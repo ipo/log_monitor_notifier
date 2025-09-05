@@ -4,7 +4,8 @@ import argparse
 import os
 import re
 import time
-from typing import List, Dict, Set
+import requests
+from typing import List, Dict, Set, Optional
 
 
 class LogMonitor:
@@ -13,29 +14,16 @@ class LogMonitor:
         self.file_positions: Dict[str, int] = {}
         self.file_sizes: Dict[str, int] = {}
         
-        # Use provided patterns or fallback to defaults
-        if regex_patterns:
-            self.pattern_configs = []
-            for i, pattern_str in enumerate(regex_patterns):
-                try:
-                    compiled_pattern = re.compile(pattern_str, re.IGNORECASE)
-                    template = tts_templates[i] if tts_templates and i < len(tts_templates) else "Match found in {filename}: {match}"
-                    self.pattern_configs.append({
-                        'pattern': compiled_pattern,
-                        'template': template,
-                        'pattern_str': pattern_str
-                    })
-                except re.error as e:
-                    print(f"Warning: Invalid regex pattern '{pattern_str}': {e}")
-        else:
-            # Default patterns for backward compatibility
-            self.pattern_configs = [
-                {'pattern': re.compile(r'ERROR.*', re.IGNORECASE), 'template': 'Error found in {filename}: {match}', 'pattern_str': 'ERROR.*'},
-                {'pattern': re.compile(r'CRITICAL.*', re.IGNORECASE), 'template': 'Critical issue found in {filename}: {match}', 'pattern_str': 'CRITICAL.*'},
-                {'pattern': re.compile(r'FATAL.*', re.IGNORECASE), 'template': 'Fatal error found in {filename}: {match}', 'pattern_str': 'FATAL.*'},
-                {'pattern': re.compile(r'exception', re.IGNORECASE), 'template': 'Exception found in {filename}: {match}', 'pattern_str': 'exception'},
-                {'pattern': re.compile(r'failed.*login', re.IGNORECASE), 'template': 'Failed login attempt found in {filename}: {match}', 'pattern_str': 'failed.*login'},
-            ]
+        # Use provided patterns - no defaults
+        self.pattern_configs = []
+        for i, pattern_str in enumerate(regex_patterns):
+            compiled_pattern = re.compile(pattern_str)
+            template = tts_templates[i]
+            self.pattern_configs.append({
+                'pattern': compiled_pattern,
+                'template': template,
+                'pattern_str': pattern_str
+            })
         
         for file_path in self.files:
             if os.path.exists(file_path):
@@ -45,6 +33,37 @@ class LogMonitor:
             else:
                 self.file_positions[file_path] = 0
                 self.file_sizes[file_path] = 0
+
+    def send_api_notification(self, tts_message: str) -> bool:
+        """Send notification to remote API using environment variables for config"""
+        api_key = os.environ['API_KEY']
+        url = os.environ['API_URL']
+        
+        # Prepare request data - only title and tts_text are used
+        data = {
+            "title": "Log Monitor Alert",
+            "tts_text": tts_message
+        }
+        
+        # Prepare headers
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": api_key
+        }
+        
+        # Make API request
+        try:
+            response = requests.post(url, json=data, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                return True
+            else:
+                print(f"API notification failed with status {response.status_code}")
+                return False
+                
+        except Exception as e:
+            print(f"API notification error: {e}")
+            return False
 
     def alert(self, filename: str, line_number: int, line: str, pattern_config: dict, match_obj):
         """Alert function that formats matches using TTS templates"""
@@ -62,12 +81,11 @@ class LogMonitor:
             template_vars.update(match_obj.groupdict())
         
         # Format the TTS message
-        try:
-            tts_message = pattern_config['template'].format(**template_vars)
-            print(f"TTS: {tts_message}")
-        except KeyError as e:
-            print(f"TTS Template Error: Missing variable {e} in template '{pattern_config['template']}'")
-            print(f"FALLBACK ALERT: {filename}:{line_number} - Pattern '{pattern_config['pattern_str']}' matched: {line.strip()}")
+        tts_message = pattern_config['template'].format(**template_vars)
+        print(f"TTS: {tts_message}")
+        
+        # Send API notification
+        self.send_api_notification(tts_message)
 
     def check_patterns(self, line: str) -> List[tuple]:
         """Check a line against all regex patterns and return matching pattern configs with match objects"""
@@ -98,10 +116,7 @@ class LogMonitor:
                 f.seek(last_position)
                 raw_content = f.read(bytes_to_read)
                 
-                try:
-                    content = raw_content.decode('utf-8')
-                except UnicodeDecodeError:
-                    content = raw_content.decode('utf-8', errors='ignore')
+                content = raw_content.decode('utf-8')
                 
                 if content.endswith('\n'):
                     new_lines = content[:-1].split('\n')
@@ -149,17 +164,17 @@ def main():
         epilog=r'''
 REGEX AND TTS TEMPLATE EXAMPLES:
   Basic patterns with TTS templates:
-    --regex "ERROR" --template "Error detected in {filename}"
-    --regex "WARN|ERROR" --template "Warning or error found in {filename}: {match}"
+    --regex "(?i)ERROR" --template "Error detected in {filename}"
+    --regex "(?i)WARN|ERROR" --template "Warning or error found in {filename}: {match}"
     
   Named groups in templates:
-    --regex "(?P<timestamp>[0-9T:-]+).*ERROR.*(?P<code>[0-9]+)" \
+    --regex "(?P<timestamp>[0-9T:-]+).*(?i:ERROR).*(?P<code>[0-9]+)" \
     --template "Error code {code} at {timestamp} in {filename}"
     
   Multiple patterns with templates:
-    --regex "failed.*login.*attempt" --template "Failed login in {filename}" \
+    --regex "(?i)failed.*login.*attempt" --template "Failed login in {filename}" \
     --regex "HTTP [45][0-9][0-9]" --template "HTTP error in {filename}: {match}" \
-    --regex "exception.*stack.*trace" --template "Exception with stack trace in {filename}"
+    --regex "(?i)exception.*stack.*trace" --template "Exception with stack trace in {filename}"
     
   Template variables available:
     {filename}     # Log filename without path (e.g., "app.log")
@@ -167,11 +182,24 @@ REGEX AND TTS TEMPLATE EXAMPLES:
     {match}        # Full matched text
     {groupname}    # Any named regex groups (e.g., (?P<groupname>...))
     
+INLINE REGEX MODIFIERS:
+  (?i)           # Case-insensitive matching
+  (?x)           # Verbose mode (ignore whitespace and comments)
+  (?a)           # ASCII-only matching
+  (?u)           # Unicode matching (default in Python 3)
+  (?L)           # Locale-dependent matching
+  (?i:pattern)   # Case-insensitive for specific group only
+  (?-i:pattern)  # Case-sensitive for specific group only
+  
+  Combinations:
+  (?ix)          # Case-insensitive + verbose mode
+  (?i)ERROR|(?-i)WARN  # Mixed case sensitivity
+  
 NOTES:
   - Number of --template arguments must match number of --regex arguments
-  - Patterns are case-insensitive by default (use --case-sensitive to change)
+  - Patterns are case-sensitive by default (use (?i) for case-insensitive)
   - Use single quotes to avoid shell escaping issues
-  - If no --regex specified, uses default error/warning patterns with default templates
+  - All --regex and --template arguments are required
         ''',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -179,46 +207,31 @@ NOTES:
     parser.add_argument('files', nargs='+', 
                        help='Log files to monitor')
     
-    parser.add_argument('--regex', '-r', action='append', dest='regex_patterns',
-                       help='Regex pattern to match (can be used multiple times). '
-                            'If not specified, uses default error patterns.')
+    parser.add_argument('--regex', '-r', action='append', dest='regex_patterns', required=True,
+                       help='Regex pattern to match (can be used multiple times). Required.')
     
-    parser.add_argument('--template', '-t', action='append', dest='tts_templates',
+    parser.add_argument('--template', '-t', action='append', dest='tts_templates', required=True,
                        help='TTS template for corresponding regex pattern. Must match number of --regex arguments. '
                             'Template variables: {filename}, {line_number}, {match}, and any named groups from regex.')
     
     parser.add_argument('--interval', type=float, default=1.0, 
                        help='Check interval in seconds (default: 1.0)')
     
-    parser.add_argument('--case-sensitive', action='store_true',
-                       help='Make regex patterns case-sensitive (default: case-insensitive)')
     
     args = parser.parse_args()
     
     # Validate template count matches pattern count
-    if args.regex_patterns and args.tts_templates:
-        if len(args.regex_patterns) != len(args.tts_templates):
-            parser.error(f"Number of --template arguments ({len(args.tts_templates)}) must match number of --regex arguments ({len(args.regex_patterns)})")
+    if len(args.regex_patterns) != len(args.tts_templates):
+        parser.error(f"Number of --template arguments ({len(args.tts_templates)}) must match number of --regex arguments ({len(args.regex_patterns)})")
     
     # Show patterns being used
-    if args.regex_patterns:
-        print(f"Using {len(args.regex_patterns)} custom regex pattern(s):")
-        for i, pattern in enumerate(args.regex_patterns, 1):
-            template = args.tts_templates[i-1] if args.tts_templates else "Match found in {filename}: {match}"
-            print(f"  {i}. Pattern: {pattern}")
-            print(f"     Template: {template}")
-    else:
-        print("Using default patterns: ERROR, CRITICAL, FATAL, exception, failed.*login")
+    print(f"Using {len(args.regex_patterns)} custom regex pattern(s):")
+    for i, pattern in enumerate(args.regex_patterns, 1):
+        template = args.tts_templates[i-1]
+        print(f"  {i}. Pattern: {pattern}")
+        print(f"     Template: {template}")
     
     monitor = LogMonitor(args.files, args.regex_patterns, args.tts_templates)
-    
-    # Update case sensitivity if requested
-    if args.case_sensitive and args.regex_patterns:
-        for i, pattern_config in enumerate(monitor.pattern_configs):
-            try:
-                pattern_config['pattern'] = re.compile(pattern_config['pattern_str'])  # No re.IGNORECASE
-            except re.error as e:
-                print(f"Warning: Invalid regex pattern '{pattern_config['pattern_str']}': {e}")
     
     monitor.monitor_files()
 
