@@ -1,0 +1,19 @@
+2025-09-05 10:00:01 INFO Application started successfully
+2025-09-05 10:00:02 INFO Database connection established
+2025-09-05 10:00:05 DEBUG User login attempt for user: admin
+2025-09-05 10:00:06 INFO User admin logged in successfully
+2025-09-05 10:01:15 WARNING Connection timeout for user session 12345
+2025-09-05 10:01:20 ERROR Failed to process payment for order #98765
+2025-09-05 10:01:22 INFO Retrying payment processing
+2025-09-05 10:02:01 DEBUG Cache cleared successfully
+2025-09-05 10:02:05 INFO Scheduled backup completed
+2025-09-05 10:03:10 ERROR Database connection lost - attempting reconnect
+2025-09-05 10:03:15 CRITICAL System memory usage at 95%
+2025-09-05 10:03:20 INFO Database reconnection successful
+2025-09-05 10:04:30 WARNING Invalid API key used in request
+2025-09-05 10:05:01 ERROR Exception in thread-pool-1: NullPointerException
+2025-09-05 10:05:02 DEBUG Stack trace: java.lang.NullPointerException at com.example.Service.process
+2025-09-05 10:06:15 INFO System health check passed
+2025-09-05 10:07:30 ERROR Failed login attempt for user: hacker123
+2025-09-05 10:07:35 WARNING Multiple failed login attempts detected
+2025-09-05 10:08:00 FATAL System crash detected - initiating emergency shutdown
