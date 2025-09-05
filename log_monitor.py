@@ -41,7 +41,7 @@ class LogMonitor:
         
         # Prepare request data - only title and tts_text are used
         data = {
-            "title": "Log Monitor Alert",
+            "title": tts_message,
             "tts_text": tts_message
         }
         
