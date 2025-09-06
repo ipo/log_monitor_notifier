@@ -9,10 +9,11 @@ from typing import List, Dict, Set, Optional
 
 
 class LogMonitor:
-    def __init__(self, files: List[str], regex_patterns: List[str] = None, tts_templates: List[str] = None):
+    def __init__(self, files: List[str], regex_patterns: List[str] = None, tts_templates: List[str] = None, maximum_lifetime_hours: int = 1):
         self.files = files
         self.file_positions: Dict[str, int] = {}
         self.file_sizes: Dict[str, int] = {}
+        self.maximum_lifetime_hours = maximum_lifetime_hours
         
         # Use provided patterns - no defaults
         self.pattern_configs = []
@@ -34,7 +35,7 @@ class LogMonitor:
                 self.file_positions[file_path] = 0
                 self.file_sizes[file_path] = 0
 
-    def send_api_notification(self, tts_message: str) -> bool:
+    def send_api_notification(self, tts_message: str, maximum_lifetime_hours: int = 1) -> bool:
         """Send notification to remote API using environment variables for config"""
         api_key = os.environ['API_KEY']
         url = os.environ['API_URL']
@@ -42,7 +43,8 @@ class LogMonitor:
         # Prepare request data - only title and tts_text are used
         data = {
             "title": tts_message,
-            "tts_text": tts_message
+            "tts_text": tts_message,
+            "maximum_lifetime_hours": maximum_lifetime_hours
         }
         
         # Prepare headers
@@ -85,7 +87,7 @@ class LogMonitor:
         print(f"TTS: {tts_message}")
         
         # Send API notification
-        self.send_api_notification(tts_message)
+        self.send_api_notification(tts_message, self.maximum_lifetime_hours)
 
     def check_patterns(self, line: str) -> List[tuple]:
         """Check a line against all regex patterns and return matching pattern configs with match objects"""
@@ -217,6 +219,8 @@ NOTES:
     parser.add_argument('--interval', type=float, default=1.0, 
                        help='Check interval in seconds (default: 1.0)')
     
+    parser.add_argument('--maximum_lifetime_hours', type=int, default=1,
+                       help='Maximum lifetime in hours for notifications (default: 1, range: 1-8760)')
     
     args = parser.parse_args()
     
@@ -231,7 +235,7 @@ NOTES:
         print(f"  {i}. Pattern: {pattern}")
         print(f"     Template: {template}")
     
-    monitor = LogMonitor(args.files, args.regex_patterns, args.tts_templates)
+    monitor = LogMonitor(args.files, args.regex_patterns, args.tts_templates, args.maximum_lifetime_hours)
     
     monitor.monitor_files()
 
