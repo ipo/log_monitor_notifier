@@ -1,20 +1,34 @@
 #!/usr/bin/env python3
 
 import argparse
+import glob
 import os
 import re
 import time
 import requests
-from typing import List, Dict, Set, Optional
+from typing import List, Dict, Optional
 
 
 class LogMonitor:
-    def __init__(self, files: List[str], regex_patterns: List[str] = None, tts_templates: List[str] = None, maximum_lifetime_hours: int = 1):
-        self.files = files
+    def __init__(
+        self,
+        files: List[str],
+        regex_patterns: List[str] = None,
+        tts_templates: List[str] = None,
+        maximum_lifetime_hours: int = 1,
+        pattern_specs: Optional[List[Dict[str, object]]] = None,
+        poll_interval: float = 1.0,
+        pattern_refresh_interval: float = 30.0,
+    ):
+        self.files: List[str] = []
         self.file_positions: Dict[str, int] = {}
         self.file_sizes: Dict[str, int] = {}
         self.maximum_lifetime_hours = maximum_lifetime_hours
-        
+        self.pattern_specs = pattern_specs or []
+        self.poll_interval = max(poll_interval, 0.01)
+        self.pattern_refresh_interval = pattern_refresh_interval if pattern_refresh_interval > 0 else self.poll_interval
+        self.next_pattern_refresh = time.monotonic()
+
         # Use provided patterns - no defaults
         self.pattern_configs = []
         for i, pattern_str in enumerate(regex_patterns):
@@ -25,15 +39,31 @@ class LogMonitor:
                 'template': template,
                 'pattern_str': pattern_str
             })
-        
-        for file_path in self.files:
-            if os.path.exists(file_path):
-                stat = os.stat(file_path)
-                self.file_positions[file_path] = stat.st_size
-                self.file_sizes[file_path] = stat.st_size
-            else:
-                self.file_positions[file_path] = 0
-                self.file_sizes[file_path] = 0
+
+        for file_path in files:
+            self._register_file(file_path)
+
+        # Initial pattern refresh to pick up any existing matches immediately
+        self.refresh_patterns(force=True)
+
+    def _register_file(self, file_path: str):
+        """Add a file to tracking, starting at its current size."""
+        abs_path = os.path.abspath(file_path)
+
+        if abs_path in self.file_positions:
+            return
+
+        if abs_path not in self.files:
+            self.files.append(abs_path)
+
+        if os.path.exists(abs_path):
+            stat = os.stat(abs_path)
+            self.file_positions[abs_path] = stat.st_size
+            self.file_sizes[abs_path] = stat.st_size
+            print(f"Added file to monitor: {abs_path}")
+        else:
+            self.file_positions[abs_path] = 0
+            self.file_sizes[abs_path] = 0
 
     def send_api_notification(self, tts_message: str, maximum_lifetime_hours: int = 1) -> bool:
         """Send notification to remote API using environment variables for config"""
@@ -101,6 +131,7 @@ class LogMonitor:
     def read_new_content(self, file_path: str) -> List[str]:
         """Read new content from file since last position"""
         try:
+            file_path = os.path.abspath(file_path)
             if not os.path.exists(file_path):
                 return []
             
@@ -139,11 +170,21 @@ class LogMonitor:
 
     def monitor_files(self):
         """Main monitoring loop"""
-        print(f"Starting log monitor for files: {', '.join(self.files)}")
-        
+        if self.files:
+            print(f"Starting log monitor for files: {', '.join(self.files)}")
+        else:
+            print("Starting log monitor with no initial files.")
+
+        if self.pattern_specs:
+            print("Monitoring glob patterns:")
+            for spec in self.pattern_specs:
+                print(f"  - {spec['pattern']}")
+
         try:
             while True:
-                for file_path in self.files:
+                self.refresh_patterns()
+
+                for file_path in list(self.file_positions.keys()):
                     new_lines = self.read_new_content(file_path)
                     
                     for line_num, line in enumerate(new_lines, 1):
@@ -154,10 +195,29 @@ class LogMonitor:
                                          self.file_positions.get(file_path, 0) + line_num, 
                                          line, pattern_config, match_obj)
                 
-                time.sleep(1)
+                time.sleep(self.poll_interval)
                 
         except KeyboardInterrupt:
             print("\nMonitoring stopped by user.")
+
+    def refresh_patterns(self, force: bool = False):
+        """Refresh glob patterns to discover new files."""
+        if not self.pattern_specs:
+            return
+
+        now = time.monotonic()
+        if not force and now < self.next_pattern_refresh:
+            return
+
+        for spec in self.pattern_specs:
+            pattern = spec['pattern']
+            recursive = spec.get('recursive', False)
+            for matched_path in glob.iglob(pattern, recursive=recursive):
+                if os.path.isdir(matched_path):
+                    continue
+                self._register_file(matched_path)
+
+        self.next_pattern_refresh = now + self.pattern_refresh_interval
 
 
 def main():
@@ -221,22 +281,47 @@ NOTES:
     
     parser.add_argument('--maximum_lifetime_hours', type=int, default=1,
                        help='Maximum lifetime in hours for notifications (default: 1, range: 1-8760)')
-    
+
+    parser.add_argument('--pattern-refresh-interval', type=float, default=30.0,
+                       help='How often to rescan glob patterns for new files in seconds (default: 30.0)')
+
     args = parser.parse_args()
     
     # Validate template count matches pattern count
     if len(args.regex_patterns) != len(args.tts_templates):
         parser.error(f"Number of --template arguments ({len(args.tts_templates)}) must match number of --regex arguments ({len(args.regex_patterns)})")
-    
+
+    pattern_specs = []
+    initial_files: List[str] = []
+
+    for raw_path in args.files:
+        if glob.has_magic(raw_path):
+            recursive = '**' in raw_path
+            pattern_specs.append({'pattern': raw_path, 'recursive': recursive})
+            for matched in glob.glob(raw_path, recursive=recursive):
+                if os.path.isdir(matched):
+                    continue
+                initial_files.append(matched)
+        else:
+            initial_files.append(raw_path)
+
     # Show patterns being used
     print(f"Using {len(args.regex_patterns)} custom regex pattern(s):")
     for i, pattern in enumerate(args.regex_patterns, 1):
         template = args.tts_templates[i-1]
         print(f"  {i}. Pattern: {pattern}")
         print(f"     Template: {template}")
-    
-    monitor = LogMonitor(args.files, args.regex_patterns, args.tts_templates, args.maximum_lifetime_hours)
-    
+
+    monitor = LogMonitor(
+        initial_files,
+        args.regex_patterns,
+        args.tts_templates,
+        args.maximum_lifetime_hours,
+        pattern_specs=pattern_specs,
+        poll_interval=args.interval,
+        pattern_refresh_interval=args.pattern_refresh_interval,
+    )
+
     monitor.monitor_files()
 
 

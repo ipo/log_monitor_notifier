@@ -327,6 +327,39 @@ class TestLogMonitorIntegration(unittest.TestCase):
         self.assertIn("ERROR Something went wrong", error_matches[0])
         self.assertIn("CRITICAL System failure", critical_matches[0])
 
+    def test_glob_pattern_refresh_detects_new_files(self):
+        """Test that glob pattern refresh discovers new files and tails from EOF."""
+        patterns = ['(?i)ERROR.*']
+        templates = ['Error found in {filename}: {match}']
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            pattern = os.path.join(tempdir, '*.log')
+            monitor = LogMonitor(
+                [],
+                patterns,
+                templates,
+                pattern_specs=[{'pattern': pattern, 'recursive': False}],
+                pattern_refresh_interval=0.01,
+            )
+
+            monitor.refresh_patterns(force=True)
+
+            new_file = os.path.join(tempdir, 'dynamic.log')
+            with open(new_file, 'w', encoding='utf-8') as f:
+                f.write('Existing line that should be skipped\n')
+
+            monitor.refresh_patterns(force=True)
+
+            tracked_path = os.path.abspath(new_file)
+            self.assertIn(tracked_path, monitor.file_positions)
+            self.assertEqual(monitor.file_positions[tracked_path], os.path.getsize(tracked_path))
+
+            with open(new_file, 'a', encoding='utf-8') as f:
+                f.write('ERROR Newly appended line\n')
+
+            new_lines = monitor.read_new_content(tracked_path)
+            self.assertEqual(new_lines, ['ERROR Newly appended line'])
+
 
 if __name__ == '__main__':
     unittest.main()
