@@ -4,9 +4,40 @@ import argparse
 import glob
 import os
 import re
+import sys
 import time
 import requests
 from typing import List, Dict, Optional
+
+
+def _format_regex_compile_error(pattern_index: int, pattern_str: str, err: re.error) -> str:
+    """Return a user-friendly error message showing where regex compilation failed."""
+    message_lines = [
+        f"Invalid regular expression for --regex #{pattern_index + 1}: {pattern_str!r}"
+    ]
+
+    lines = pattern_str.splitlines() or [pattern_str]
+    lineno = getattr(err, 'lineno', None)
+    colno = getattr(err, 'colno', None)
+
+    if lineno is None or lineno < 1 or lineno > len(lines):
+        lineno = 1
+
+    if colno is None:
+        pos = getattr(err, 'pos', None)
+        colno = (pos + 1) if isinstance(pos, int) and pos >= 0 else None
+
+    if 1 <= lineno <= len(lines):
+        prefix = f"  Line {lineno}: "
+        line_text = lines[lineno - 1]
+        message_lines.append(prefix + line_text)
+
+        if isinstance(colno, int) and colno > 0:
+            caret_indent = " " * len(prefix) + " " * (colno - 1)
+            message_lines.append(caret_indent + "^")
+
+    message_lines.append(f"re.error: {err}")
+    return "\n".join(message_lines)
 
 
 class LogMonitor:
@@ -31,8 +62,13 @@ class LogMonitor:
 
         # Use provided patterns - no defaults
         self.pattern_configs = []
-        for i, pattern_str in enumerate(regex_patterns):
-            compiled_pattern = re.compile(pattern_str)
+        for i, pattern_str in enumerate(regex_patterns or []):
+            try:
+                compiled_pattern = re.compile(pattern_str)
+            except re.error as err:
+                message = _format_regex_compile_error(i, pattern_str, err)
+                raise ValueError(message) from err
+
             template = tts_templates[i]
             self.pattern_configs.append({
                 'pattern': compiled_pattern,
@@ -312,15 +348,19 @@ NOTES:
         print(f"  {i}. Pattern: {pattern}")
         print(f"     Template: {template}")
 
-    monitor = LogMonitor(
-        initial_files,
-        args.regex_patterns,
-        args.tts_templates,
-        args.maximum_lifetime_hours,
-        pattern_specs=pattern_specs,
-        poll_interval=args.interval,
-        pattern_refresh_interval=args.pattern_refresh_interval,
-    )
+    try:
+        monitor = LogMonitor(
+            initial_files,
+            args.regex_patterns,
+            args.tts_templates,
+            args.maximum_lifetime_hours,
+            pattern_specs=pattern_specs,
+            poll_interval=args.interval,
+            pattern_refresh_interval=args.pattern_refresh_interval,
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from exc
 
     monitor.monitor_files()
 
